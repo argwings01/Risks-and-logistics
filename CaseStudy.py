@@ -9,7 +9,7 @@ import pandas as pd
 import xpress as xp
 import os
 import zipfile
-
+xp.init('C:/xpressmp//bin/xpauth.xpr')
 
 zip_path = "CaseStudyDataPY.zip"
 data_dir = "CaseStudyDataPY"
@@ -33,7 +33,7 @@ nbSuppliers = Suppliers_df.index.max()
 
 Suppliers_df.columns
 Supp_Area= Suppliers_df[Suppliers_df['Postal code'].str.startswith('EH', na=False)].copy()
-Supp_Area
+Supp_Area.columns
 # -----------------------------------------------------------------------------
 # Read postcode district data (used to define customers)
 # -----------------------------------------------------------------------------
@@ -49,7 +49,7 @@ nbCandidates = Candidates_df.index.max()
 
 Candidates_df.columns
 Cand_Area = Candidates_df[Candidates_df['Postal Area'].str.startswith('EH', na=False)].copy()
-Cand_Area
+Cand_Area.columns
 # -----------------------------------------------------------------------------
 # Read distance matrices
 # Supplier → District distances
@@ -66,7 +66,7 @@ DistanceDistrictDistrict_df = pd.read_csv(
 )
 DistanceDistrictDistrict_df.columns = DistanceDistrictDistrict_df.columns.astype(int)
 
-
+DistanceDistrictDistrict_df.info()
 # -----------------------------------------------------------------------------
 # Read aggregate demand data (no time dimension)
 # Creates a dictionary keyed by (Customer, Product)
@@ -78,7 +78,7 @@ Demand = (
         .to_dict()
 )
 
-
+Demand
 # -----------------------------------------------------------------------------
 # Read demand data with time periods
 # Creates a dictionary keyed by (Customer, Product, Period)
@@ -92,8 +92,8 @@ DemandPeriods = (
 
 # Number of time periods
 nbPeriods = DemandPeriods_df["Period"].max()
-
-
+nbPeriods
+DemandPeriods_df
 # -----------------------------------------------------------------------------
 # Read demand data with time periods and scenarios
 # Creates a dictionary keyed by (Customer, Product, Period, Scenario)
@@ -107,7 +107,7 @@ DemandPeriodsScenarios = (
 
 # Number of scenarios
 nbScenarios = DemandPeriodsScenarios_df["Scenario"].max()
-
+DemandPeriodsScenarios_df
 
 # =============================================================================
 # Index sets
@@ -116,7 +116,9 @@ Customers  = PostcodeDistricts.index
 Candidates = Candidates_df.index
 Suppliers  = Suppliers_df.index
 
-print(Customers.describe())
+Candidates
+Customers
+Suppliers
 # =============================================================================
 # Vehicle-related data
 # Vehicles are indexed as:
@@ -159,6 +161,7 @@ VehicleCO2PerMileAndTonne = {
 # -----------------------------------------------------------------------------
 Times = range(1, nbPeriods + 1)
 Scenarios = range(1, nbScenarios + 1)
+Products = range (1, 4)
 
 
 # =============================================================================
@@ -190,12 +193,102 @@ CostCandidateCustomers = {
     for j in Candidates
     for i in Customers
 }
-
+CostSupplierCandidate
 
 # =============================================================================
 # Build optimization model
 # =============================================================================
 prob = xp.problem("Assignment 1")
+
+# Parameters
+y = prob.addVariables(Candidates, Times, name='y', vartype=xp.binary)
+z = prob.addVariables(Candidates, Times, name='z', vartype=xp.binary)
+x = prob.addVariables(Customers, Candidates, Times, name='x', vartype=xp.binary)
+M = prob.addVariables(
+    Candidates, Customers, Times, Products,
+    vartype=xp.integer,
+    name="M"
+)
+
+# Objective Function
+#obj_eqn = xp.Sum(z[j, t] * Candidates_df["Setup cost"][j] +  y[j, t] * Candidates_df["Operating"][j] for j in Candidates for t in Times
+#                 xp.Sum( xp.Sum(CostSupplierCandidate[k] * DistanceSupplierDistrict_df[k, j] * M[k, j, t, q] for k in Suppliers)
+#                        + xp.Sum(CostCandidateCustomers * DistanceDistrictDistrict_df[j, i]* DemandPeriods_df[["Demand","Product"]][i, q, t] * x[i, j, t] for i in Customers)
+##)
+
+obj_eqn = xp.Sum(
+    z[j, t] * Candidates_df["Setup cost"][j] +
+    y[j, t] * Candidates_df["Operating"][j] +
+    
+    xp.Sum(
+        CostSupplierCandidate[k] *
+        DistanceSupplierDistrict_df.loc[k, j] *
+        M[k, j, t, q]
+        for k in Suppliers
+    ) +
+    
+    xp.Sum(
+        CostCandidateCustomers[i] *
+        DistanceDistrictDistrict_df.loc[j, i] *
+        DemandPeriods_df[["Demand", "Product"]][i, q][ t] *
+        x[i, j, t]
+        for i in Customers
+    )
+    
+    for j in Candidates for t in Times for q in Products
+)
+
+prob.setObjective(obj_eqn , sense=xp.minimize)
+
+prob.setObjective(
+    xp.Sum(
+        z[j,t] * Candidates_df.loc[j, "Setup cost"]
+        + y[j,t] * Candidates_df.loc[j, "Operating"]
+        + xp.Sum(
+            CostSupplierCandidate *
+            DistanceSupplierDistrict_df.loc[k, j] *
+            M[k,j,t,q]
+            for k in Suppliers
+        )
+        + xp.Sum(
+            CostCandidateCustomers*
+            DistanceDistrictDistrict_df.loc[j, i] *
+            DemandPeriods_df.loc[(i,q,t), "Demand"] *
+            x[i,j,t]
+            for i in Customers
+        )
+        for j in Candidates for t in Times for q in Products
+    ),
+    sense=xp.minimize
+)
+
+
+# Constraints
+prob.addConstraint(y[j, t] >= y[j, t-1] for j in Candidates for t in Times if t > 0)
+
+prob.addConstraint(y[j, t] >= z[j, t] for j in Candidates for t in Times)
+prob.addConstraint(xp.Sum(z[j, t]) <= 1  for t in Times for j in Candidates)
+prob.addConstraint(x[i, j, t] <= y[j, t] for i in Customers for j in Candidates for t in Times)
+prob.addConstraint(xp.Sum(x[i, j, t]) == 1 for j in Candidates for i in Customers for t in Times )
+prob.addConstraint(M[k, j, t, q] == 0 for j in Candidates for k in Suppliers for q in Products for t in Times)
+prob.addConstraint(
+    y[j, t] * Suppliers_df["Capacity"][k]>= xp.Sum(M[k, j, t, q]) >= 0
+    for j in Candidates for k in Suppliers for q in Products for t in Times
+    )
+prob.addConstraint(
+    xp.Sum(DemandPeriods_df[["Demand","Product"]][i, q][1]) * x[i, j, 1] <=
+    xp.Sum(M[k, j, 1, q]) <= Candidates_df["Capacity"][j] * y[j,1]
+    for j in Candidates for k in Suppliers for q in Products for i in Candidates
+    )
+prob.addConstraint(
+ xp.Sum(DemandPeriods_df[["Demand","Product"]][i, q][t] * x[i, j, t] for i in Customers) <= 
+ xp.Sum(M[k, j, t, q] for k in Suppliers) + 
+ xp.Sum(xp.Sum(M[k, j, m, q] for k in Suppliers) - xp.Sum(DemandPeriods_df[["Demand","Product"]][i, q] * x[i, j, m] for i in Customers) 
+           for m in range(t)) <= 
+    Candidates_df["Capacity"][j] * y[j,t]
+    for j in Candidates for t in range(1, len(Times)) for q in Products
+)
+
 
 # To turn on and off the solver log
 xp.setOutputEnabled(True)

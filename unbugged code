@@ -1,0 +1,305 @@
+# -*- coding: utf-8 -*-
+"""
+Created on Mon Jan 12 13:58:41 2026
+
+@author: ksearle
+"""
+
+import pandas as pd
+import xpress as xp
+import os
+import zipfile
+xp.init('C:/xpressmp//bin/xpauth.xpr')
+
+zip_path = "CaseStudyDataPY.zip"
+data_dir = "CaseStudyDataPY"
+
+# -----------------------------------------------------------------------------
+# Create directory and extract CSVs if it doesn't exist
+# -----------------------------------------------------------------------------
+if not os.path.exists(data_dir):
+    os.makedirs(data_dir)
+    with zipfile.ZipFile(zip_path, "r") as zip_ref:
+        zip_ref.extractall(data_dir)
+
+
+# -----------------------------------------------------------------------------
+# Read supplier data
+# The first column is used as the supplier index
+# -----------------------------------------------------------------------------
+Suppliers_df = pd.read_csv(f"{data_dir}/Suppliers.csv", index_col=0)
+# Maximum supplier index (assumed to be integer-indexed)
+nbSuppliers = Suppliers_df.index.max()
+
+Suppliers_df.columns
+Supp_Area= Suppliers_df[Suppliers_df['Postal code'].str.startswith('EH', na=False)].copy()
+Supp_Area.columns
+# -----------------------------------------------------------------------------
+# Read postcode district data (used to define customers)
+# -----------------------------------------------------------------------------
+PostcodeDistricts = pd.read_csv(f"{data_dir}/PostcodeDistricts.csv", index_col=0)
+
+
+# -----------------------------------------------------------------------------
+# Read candidate facility data
+# -----------------------------------------------------------------------------
+Candidates_df = pd.read_csv(f"{data_dir}/Candidates.csv", index_col=0)
+# Maximum candidate index
+nbCandidates = Candidates_df.index.max()
+
+Candidates_df.columns
+Cand_Area = Candidates_df[Candidates_df['Postal Area'].str.startswith('EH', na=False)].copy()
+Cand_Area.columns
+# -----------------------------------------------------------------------------
+# Read distance matrices
+# Supplier → District distances
+# District → District distances
+# Column names are converted from strings to integers for correct .loc indexing
+# -----------------------------------------------------------------------------
+DistanceSupplierDistrict_df = pd.read_csv(
+    f"{data_dir}/Distance Supplier-District.csv", index_col=0
+)
+DistanceSupplierDistrict_df.columns = DistanceSupplierDistrict_df.columns.astype(int)
+
+DistanceDistrictDistrict_df = pd.read_csv(
+    f"{data_dir}/Distance District-District.csv", index_col=0
+)
+DistanceDistrictDistrict_df.columns = DistanceDistrictDistrict_df.columns.astype(int)
+
+DistanceDistrictDistrict_df.info()
+# -----------------------------------------------------------------------------
+# Read aggregate demand data (no time dimension)
+# Creates a dictionary keyed by (Customer, Product)
+# -----------------------------------------------------------------------------
+Demand_df = pd.read_csv(f"{data_dir}/Demand.csv")
+Demand = (
+    Demand_df
+        .set_index(["Customer", "Product"])["Demand"]
+        .to_dict()
+)
+
+Demand
+# -----------------------------------------------------------------------------
+# Read demand data with time periods
+# Creates a dictionary keyed by (Customer, Product, Period)
+# -----------------------------------------------------------------------------
+DemandPeriods_df = pd.read_csv(f"{data_dir}/DemandPeriods.csv")
+DemandPeriods = (
+    DemandPeriods_df
+        .set_index(["Customer", "Product", "Period"])["Demand"]
+        .to_dict()
+)
+
+# Number of time periods
+nbPeriods = DemandPeriods_df["Period"].max()
+nbPeriods
+DemandPeriods_df
+# -----------------------------------------------------------------------------
+# Read demand data with time periods and scenarios
+# Creates a dictionary keyed by (Customer, Product, Period, Scenario)
+# -----------------------------------------------------------------------------
+DemandPeriodsScenarios_df = pd.read_csv(f"{data_dir}/DemandPeriodScenarios.csv")
+DemandPeriodsScenarios = (
+    DemandPeriodsScenarios_df
+        .set_index(["Customer", "Product", "Period", "Scenario"])["Demand"]
+        .to_dict()
+)
+
+# Number of scenarios
+nbScenarios = DemandPeriodsScenarios_df["Scenario"].max()
+DemandPeriodsScenarios_df
+
+# =============================================================================
+# Index sets
+# =============================================================================
+Customers  = PostcodeDistricts.index
+Candidates = Candidates_df.index
+Suppliers  = Suppliers_df.index
+
+Candidates
+Customers
+Suppliers
+# =============================================================================
+# Vehicle-related data
+# Vehicles are indexed as:
+#   1 = 18t trucks
+#   2 = 7.5t lorries
+#   3 = 3.5t vans
+# =============================================================================
+
+# Vehicle capacity in tonnes
+VehicleCapacity = {
+    1: 9.0,
+    2: 2.4,
+    3: 1.5
+}
+
+# Cost in pounds per mile travelled (fixed cost)
+VehicleCostPerMileOverall = {
+    1: 1.666,
+    2: 1.727,
+    3: 1.285
+}
+
+# Cost in pounds per mile and tonne transported (variable cost)
+VehicleCostPerMileAndTonneOverall = {
+    1: 0.185,
+    2: 0.720,
+    3: 0.857
+}
+
+# CO₂ emissions in kg per mile and tonne transported
+VehicleCO2PerMileAndTonne = {
+    1: 0.11,
+    2: 0.31,
+    3: 0.30
+}
+
+
+# -----------------------------------------------------------------------------
+# Time periods and scenarios
+# -----------------------------------------------------------------------------
+Times = range(1, nbPeriods + 1)
+Scenarios = range(1, nbScenarios + 1)
+Products = range (1, 4)
+
+
+# =============================================================================
+# Transport cost calculations
+# =============================================================================
+
+# Cost from suppliers to candidate facilities
+# Round-trip distance (factor 2)
+# Cost depends on supplier vehicle type
+# Division by 1000 converts from kg to tonnes
+CostSupplierCandidate = {
+    (k, j): 2
+    * DistanceSupplierDistrict_df.loc[k, j]
+    * VehicleCostPerMileAndTonneOverall[
+        Suppliers_df.loc[k, "Vehicle type"]
+    ]
+    / 1000
+    for j in Candidates
+    for k in Suppliers
+}
+
+# Cost from candidate facilities to customers
+# All transports use 3.5t vans (vehicle type 3)
+CostCandidateCustomers = {
+    (j, i): 2
+    * DistanceDistrictDistrict_df.loc[j, i]
+    * VehicleCostPerMileAndTonneOverall[3]
+    / 1000
+    for j in Candidates
+    for i in Customers
+}
+CostSupplierCandidate
+
+# =============================================================================
+# Build optimization model
+# =============================================================================
+prob = xp.problem("Assignment 1")
+
+# Parameters
+y = prob.addVariables(Candidates, Times, name='y', vartype=xp.binary)
+z = prob.addVariables(Candidates, Times, name='z', vartype=xp.binary)
+x = prob.addVariables(Customers, Candidates, Times, name='x', vartype=xp.binary)
+M = prob.addVariables(
+    Candidates, Customers, Times, Products,
+    vartype=xp.integer,
+    name="M"
+)
+
+# Objective Function
+#obj_eqn = xp.Sum(z[j, t] * Candidates_df["Setup cost"][j] +  y[j, t] * Candidates_df["Operating"][j] for j in Candidates for t in Times
+#                 xp.Sum( xp.Sum(CostSupplierCandidate[k] * DistanceSupplierDistrict_df[k, j] * M[k, j, t, q] for k in Suppliers)
+#                        + xp.Sum(CostCandidateCustomers * DistanceDistrictDistrict_df[j, i]* DemandPeriods_df[["Demand","Product"]][i, q, t] * x[i, j, t] for i in Customers)
+##)
+
+obj_eqn = xp.Sum(
+    z[j, t] * Candidates_df["Setup cost"][j] +
+    y[j, t] * Candidates_df["Operating"][j] +
+    
+    xp.Sum(
+        CostSupplierCandidate[(k,j)] *
+        M[k, j, t, q]
+        for k in Suppliers
+    ) +
+    
+    xp.Sum(
+        CostCandidateCustomers[(j,i)] *
+        DemandPeriods[(i, q, t)] *
+        x[i, j, t]
+        for i in Customers
+    )
+    
+    for j in Candidates for t in Times for q in Products
+)
+
+prob.setObjective(obj_eqn , sense=xp.minimize)
+
+
+
+# Constraints
+prob.addConstraint(y[j, t] >= y[j, t-1] for j in Candidates for t in Times if t > 1)
+prob.addConstraint(y[j, t] >= z[j, t] for j in Candidates for t in Times)
+prob.addConstraint(xp.Sum(z[j, t] for t in Times) <= 1   for j in Candidates)
+prob.addConstraint(x[i, j, t] <= y[j, t] for i in Customers for j in Candidates for t in Times)
+prob.addConstraint(xp.Sum(x[i, j, t] for j in Candidates) == 1  for i in Customers for t in Times )
+
+#prob.addConstraint(M[k, j, t, q] == 0 for j in Candidates for k in Suppliers for q in Products for t in Times)
+
+prob.addConstraint(
+    y[j, t] * Suppliers_df["Capacity"][k]>= xp.Sum(M[k, j, t, q] for q in Products) >= 0
+    for j in Candidates for k in Suppliers for t in Times)
+
+prob.addConstraint(
+    xp.Sum(DemandPeriods[(i,q,1)] * x[i,j,1] for i in Customers)
+    <= xp.Sum(M[k,j,1,q] for k in Suppliers)
+    for j in Candidates for q in Products)
+
+prob.addConstraint(
+    xp.Sum(M[k, j, 1, q] for k in Suppliers) <= Candidates_df["Capacity"][j] * y[j,1]
+    for j in Candidates for q in Products)
+
+
+prob.addConstraint(
+ xp.Sum(DemandPeriods[(i,q,t)] * x[i, j, t] for i in Customers) <= 
+ xp.Sum(M[k, j, t, q] for k in Suppliers) + 
+ xp.Sum(xp.Sum(M[k, j, m, q] for k in Suppliers) - xp.Sum(DemandPeriods[(i,q,m)] * x[i, j, m] for i in Customers)
+           for m in Times if m<t) <= 
+    Candidates_df["Capacity"][j] * y[j,t]
+    for j in Candidates for t in Times[1:] for q in Products)
+
+# To turn on and off the solver log
+xp.setOutputEnabled(True)
+
+
+xp.setOutputEnabled(True)
+prob.solve()
+
+# =============================================================================
+# Post-processing and data visualisation
+# =============================================================================
+
+sol_status = prob.attributes.solstatus
+
+if sol_status == xp.SolStatus.OPTIMAL:
+    print("Optimal solution found")
+    best_obj = prob.attributes.objval
+    best_bound = prob.attributes.bestbound
+    mip_gap = abs(best_obj - best_bound) / (1e-10 +abs(best_obj))
+    print(f"MIP Gap: {mip_gap*100:.2f}%")
+    
+elif sol_status == xp.SolStatus.FEASIBLE:
+    print("Feasible solution (not proven optimal)")
+    best_obj = prob.attributes.objval
+    best_bound = prob.attributes.bestbound
+    mip_gap = abs(best_obj - best_bound) / (1e-10 +abs(best_obj))
+    print(f"MIP Gap: {mip_gap*100:.2f}%")
+elif sol_status == xp.SolStatus.INFEASIBLE:
+    print("Model is infeasible")
+elif sol_status == xp.SolStatus.UNBOUNDED:
+    print("Model is unbounded")
+else:
+    print("No solution available")

@@ -1,3 +1,4 @@
+## %%
 # -*- coding: utf-8 -*-
 """
 Created on Mon Jan 12 13:58:41 2026
@@ -30,6 +31,9 @@ if not os.path.exists(data_dir):
 Suppliers_df = pd.read_csv(f"{data_dir}/Suppliers.csv", index_col=0)
 # Maximum supplier index (assumed to be integer-indexed)
 nbSuppliers = Suppliers_df.index.max()
+# Product provided by each supplier
+SupplierProduct = Suppliers_df["Product group"].to_dict()
+
 
 Suppliers_df.columns
 Supp_Area= Suppliers_df[Suppliers_df['Postal code'].str.startswith('EH', na=False)].copy()
@@ -215,7 +219,7 @@ M = prob.addVariables(
 #                 xp.Sum( xp.Sum(CostSupplierCandidate[k] * DistanceSupplierDistrict_df[k, j] * M[k, j, t, q] for k in Suppliers)
 #                        + xp.Sum(CostCandidateCustomers * DistanceDistrictDistrict_df[j, i]* DemandPeriods_df[["Demand","Product"]][i, q, t] * x[i, j, t] for i in Customers)
 ##)
-
+t=1
 obj_eqn = xp.Sum(
     z[j, t] * Candidates_df["Setup cost"][j] +
     y[j, t] * Candidates_df["Operating"][j] +
@@ -247,7 +251,8 @@ prob.addConstraint(xp.Sum(z[j, t] for t in Times) <= 1   for j in Candidates)
 prob.addConstraint(x[i, j, t] <= y[j, t] for i in Customers for j in Candidates for t in Times)
 prob.addConstraint(xp.Sum(x[i, j, t] for j in Candidates) == 1  for i in Customers for t in Times )
 
-#prob.addConstraint(M[k, j, t, q] == 0 for j in Candidates for k in Suppliers for q in Products for t in Times)
+prob.addConstraint(M[k,j,t,q] == 0 for k in Suppliers for q in Products if q != SupplierProduct[k] for j in Candidates for t in Times)
+
 
 prob.addConstraint(
     y[j, t] * Suppliers_df["Capacity"][k]>= xp.Sum(M[k, j, t, q] for q in Products) >= 0
@@ -259,24 +264,48 @@ prob.addConstraint(
     for j in Candidates for q in Products)
 
 prob.addConstraint(
-    xp.Sum(M[k, j, 1, q] for k in Suppliers) <= Candidates_df["Capacity"][j] * y[j,1]
-    for j in Candidates for q in Products)
+    xp.Sum(M[k, j, 1, q] for k in Suppliers for q in Products) <= Candidates_df["Capacity"][j] * y[j,1]
+    for j in Candidates)
 
+
+#prob.addConstraint(
+# xp.Sum(DemandPeriods[(i,q,t)] * x[i, j, t] for i in Customers for q in Products) <= 
+# xp.Sum(M[k, j, t, q] for k in Suppliers for q in Products) <= 
+#    Candidates_df["Capacity"][j] * y[j,t]
+#    for j in Candidates for t in Times[1:])
 
 prob.addConstraint(
- xp.Sum(DemandPeriods[(i,q,t)] * x[i, j, t] for i in Customers) <= 
- xp.Sum(M[k, j, t, q] for k in Suppliers) + 
+ xp.Sum(DemandPeriods[(i,q,t)] * x[i, j, t] for i in Customers for q in Products) <= 
+ xp.Sum(M[k, j, t, q] for k in Suppliers for q in Products) + 
  xp.Sum(xp.Sum(M[k, j, m, q] for k in Suppliers) - xp.Sum(DemandPeriods[(i,q,m)] * x[i, j, m] for i in Customers)
-           for m in Times if m<t) <= 
+           for m in Times if m<t for q in Products) <= 
     Candidates_df["Capacity"][j] * y[j,t]
-    for j in Candidates for t in Times[1:] for q in Products)
+    for j in Candidates for t in Times[1:])
 
 # To turn on and off the solver log
 xp.setOutputEnabled(True)
 
 
 xp.setOutputEnabled(True)
-prob.solve()
+try:
+    prob.solve()
+except xp.SolverError as e:
+    print("Solver stopped with error:", e)
+
+status = prob.attributes.solstatus
+
+if status in [xp.SolStatus.FEASIBLE, xp.SolStatus.OPTIMAL]:
+    obj = prob.attributes.objval
+    bound = prob.attributes.bestbound
+
+    gap = abs(obj - bound) / abs(obj) if obj != 0 else float("inf")
+
+    print(f"Objective value : {obj}")
+    print(f"Best bound      : {bound}")
+    print(f"MIP gap         : {gap:.4%}")
+else:
+    print("No feasible solution available.")
+
 
 # =============================================================================
 # Post-processing and data visualisation
